@@ -16,15 +16,36 @@ from kerlescan import profile_parser
 
 
 def build_comparisons(
-    systems_with_profiles, baselines, historical_sys_profiles, reference_id
+    systems_with_profiles,
+    baselines,
+    historical_sys_profiles,
+    reference_id,
+    short_circuit,
 ):
     """
     given a list of system profile dicts and fact namespace, return a dict of
     comparisons, along with a dict of system data
+
+    Unless short_circuit is True, then we don't need a full comparison report, only whether any
+    changes are present at all as this is for notifications if a newly checked in hsp system
+    has drifted from an associated baseline.
+    return True: Everything matches, we don't need to notify
+    return False: Something changed, we do need to notify
     """
     fact_comparisons = _select_applicable_info(
-        systems_with_profiles, baselines, historical_sys_profiles, reference_id
+        systems_with_profiles,
+        baselines,
+        historical_sys_profiles,
+        reference_id,
+        short_circuit,
     )
+    if short_circuit:
+        if fact_comparisons:
+            return (
+                True  # do we want to pass another value for case "nothing different"?
+            )
+        else:
+            return False
 
     # remove system metadata that we put into to the comparison earlier
     stripped_comparisons = []
@@ -128,12 +149,21 @@ def _group_comparisons(comparisons):
 
 
 def _select_applicable_info(
-    systems_with_profiles, baselines, historical_sys_profiles, reference_id
+    systems_with_profiles,
+    baselines,
+    historical_sys_profiles,
+    reference_id,
+    short_circuit,
 ):
     """
     Take a list of systems with profiles, and output a "pivoted" list of
     profile facts, where each fact key has a dict of systems and their values. This is
     useful when comparing facts across systems.
+
+    Unless short_circuit is True, then we don't need a full comparison report, only whether any
+    changes are present at all as this is for notifications if a newly checked in hsp system
+    has drifted from an associated baseline.
+    return False: Something changed, we do need to notify
     """
     # create dicts of id + info
     parsed_system_profiles = []
@@ -196,14 +226,22 @@ def _select_applicable_info(
                         system["obfuscation"][key] = True
 
         current_comparison = _create_comparison(
-            parsed_system_profiles, key, reference_id, len(systems_with_profiles)
+            parsed_system_profiles,
+            key,
+            reference_id,
+            len(systems_with_profiles),
+            short_circuit,
         )
+        # since the return is empty for sap facts on non-sap systems, and that is falsey,
+        # we also need to check the len to distinguish our short_circuit response
+        if short_circuit and len(current_comparison > 0) and not current_comparison:
+            return False
         if current_comparison:
             info_comparisons.append(current_comparison)
     return info_comparisons
 
 
-def _create_comparison(systems, info_name, reference_id, system_count):
+def _create_comparison(systems, info_name, reference_id, system_count, short_circuit):
     """
     Take an individual fact, search for it across all systems, and create a dict
     of each system's ID and fact value. Additionally, add a "state" field that
@@ -216,6 +254,10 @@ def _create_comparison(systems, info_name, reference_id, system_count):
     multiple systems to each other, we use different rules for items that
     should be unique across systems like IP address.
 
+    Unless short_circuit is True, then we don't need a full comparison report, only whether any
+    changes are present at all as this is for notifications if a newly checked in hsp system
+    has drifted from an associated baseline.
+    return False: Something changed, we do need to notify
     """
     # TODO: this method is messy and could be refactored
     if info_name in SAP_RELATED_FACTS:
@@ -267,11 +309,16 @@ def _create_comparison(systems, info_name, reference_id, system_count):
         }
 
         if "N/A" in system_values:  # one or more values are missing
+            if short_circuit:
+                return False
             info_comparison = COMPARISON_DIFFERENT
         elif (
             len(system_values) <= 1
         ):  # when there is only one or zero non-obfuscated values left
             info_comparison = COMPARISON_SAME
+
+        # short_circuit checks skip these next two sections as there is always only
+        # one system being compared to one baseline in those.
 
         # we specifically want to check for more than one system not baselines below
         # so build the baseline count here
@@ -318,6 +365,8 @@ def _create_comparison(systems, info_name, reference_id, system_count):
             for values in sorted_system_id_values_without_obfuscated:
                 values["state"] = COMPARISON_SAME
                 if values["value"] != reference_value:
+                    if short_circuit:
+                        return False
                     values["state"] = COMPARISON_DIFFERENT
 
         if len(system_values) == 1:
@@ -371,6 +420,8 @@ def _create_comparison(systems, info_name, reference_id, system_count):
                     if sorted_all_value_options[row] == value:
                         column.append(value)
                     else:
+                        if short_circuit:
+                            return False
                         column.append("")
                         info_comparison = COMPARISON_DIFFERENT
                         multivalue_comparisons[row] = COMPARISON_DIFFERENT
@@ -380,6 +431,8 @@ def _create_comparison(systems, info_name, reference_id, system_count):
                     if sorted_all_value_options[row] in value:
                         column.append(sorted_all_value_options[row])
                     else:
+                        if short_circuit:
+                            return False
                         column.append("")
                         info_comparison = COMPARISON_DIFFERENT
                         multivalue_comparisons[row] = COMPARISON_DIFFERENT
@@ -387,6 +440,9 @@ def _create_comparison(systems, info_name, reference_id, system_count):
             sorted_system_id_values[value_count]["value"] = column
             value_count += 1
 
+        # when reference_comparisons are handled for multivalue, be sure to account
+        # for short_circuit checks too
+        #
         # need to account for states compared to a reference if selected
         # for system in sorted_system_id_values:
         #    system["state"] = reference_comparison
